@@ -5060,7 +5060,41 @@ function renderRekapRows(data) {
     }).join('');
 }
 
-    // --- MONITORING ---
+    // ============================================================================
+// FORMAT JAM ABSENSI — Firebase Direct
+// Menormalkan nilai jam dari Firebase menjadi HH:MM:SS (WIB).
+// Mendukung nilai "HH:MM", "HH:MM:SS", ISO datetime, dan timestamp.
+// ============================================================================
+function formatJamWIB(value) {
+    if (value === null || value === undefined || value === '' || value === '-') return '-';
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        const d = new Date(value);
+        if (!Number.isNaN(d.getTime())) {
+            const parts = new Intl.DateTimeFormat('en-GB', {
+                timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+            }).formatToParts(d);
+            const get = t => (parts.find(p => p.type === t) || {}).value || '00';
+            return get('hour') + ':' + get('minute') + ':' + get('second');
+        }
+    }
+    const raw = String(value).trim();
+    // Jika Firebase sudah menyimpan jam lokal, jangan geser zona waktu.
+    const timeOnly = raw.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+    if (timeOnly && !/[T ]\d/.test(raw)) {
+        return String(timeOnly[1]).padStart(2, '0') + ':' + timeOnly[2] + ':' + (timeOnly[3] || '00');
+    }
+    const d = new Date(raw);
+    if (!Number.isNaN(d.getTime())) {
+        return new Intl.DateTimeFormat('id-ID', {
+            timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+        }).format(d);
+    }
+    return raw;
+}
+function jamDatangWIB(value) { return formatJamWIB(value); }
+function jamPulangWIB(value) { return formatJamWIB(value); }
+
+// --- MONITORING ---
 async function loadMonitoringAbsensi() {
     stopAndBack(false);
     setActiveMenu('Monitoring');
