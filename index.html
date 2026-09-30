@@ -4675,34 +4675,51 @@ function renderSiswaRows(data, startIdx) {
     }
 
     // --- DATA GURU ---
-function normalizeGuruRecord(raw, key, profileMap) {
+function normalizeGuruRecord(raw, key, profileMap, legacyMap) {
     const g = raw || {};
     const username = String(
         g.username ?? g.userName ?? g.usernameGuru ?? g.loginUsername ?? g.identifier ?? g.email ?? key ?? ''
     ).trim();
 
-    // Nama guru TIDAK diambil dari data siswa.
-    // Prioritas: data guru sendiri -> profil security/users yang cocok dengan username/UID/email.
+    // Sumber nama guru hanya dari data Security:
+    // 1) security/legacyUsers -> field nama/namaGuru/name/dll.
+    // 2) security/users -> field nama/namaGuru/name/dll.
+    // 3) security/users.identifier sebagai fallback nama.
+    // Tidak mengambil nama dari data siswa dan tidak mengubah mekanisme login.
     let profile = null;
+    let legacy = null;
     const map = profileMap || {};
+    const lmap = legacyMap || {};
     const candidates = [
         g.uid, g.authUid, g.userUid, g.profileUid, g.email,
         g.username, g.userName, g.loginUsername, g.identifier, key
-    ].filter(v => v !== undefined && v !== null && String(v).trim() !== '').map(v => String(v).trim());
+    ].filter(v => v !== undefined && v !== null && String(v).trim() !== '')
+     .map(v => String(v).trim());
+
+    for (const c of candidates) {
+        if (lmap[c]) { legacy = lmap[c]; break; }
+        const lower = c.toLowerCase();
+        if (lmap[lower]) { legacy = lmap[lower]; break; }
+    }
     for (const c of candidates) {
         if (map[c]) { profile = map[c]; break; }
         const lower = c.toLowerCase();
         if (map[lower]) { profile = map[lower]; break; }
     }
 
-    const namaCandidates = [
-        g.nama, g.namaGuru, g.name, g.Nama, g.displayName, g.fullName,
+    const legacyNameCandidates = [
+        legacy && legacy.nama, legacy && legacy.namaGuru, legacy && legacy.name,
+        legacy && legacy.Nama, legacy && legacy.displayName, legacy && legacy.fullName,
+        legacy && legacy.identifier
+    ];
+    const userNameCandidates = [
         profile && profile.nama, profile && profile.namaGuru, profile && profile.name,
         profile && profile.Nama, profile && profile.displayName, profile && profile.fullName,
         profile && profile.identifier
     ];
+
     let nama = '';
-    for (const value of namaCandidates) {
+    for (const value of legacyNameCandidates.concat(userNameCandidates)) {
         const v = String(value == null ? '' : value).trim();
         if (v && v.toLowerCase() !== 'undefined' && v.toLowerCase() !== 'null') {
             nama = v;
@@ -4710,13 +4727,19 @@ function normalizeGuruRecord(raw, key, profileMap) {
         }
     }
 
-    // Jika sumber Firebase memang belum memiliki nama, jangan tampilkan "undefined"
-    // dan jangan mengarang nama. Gunakan username sebagai fallback yang aman.
+    // Jangan pernah menampilkan literal undefined dan jangan mengarang nama.
     if (!nama) nama = username || 'Nama Guru Belum Diisi';
 
-    const kelas = String(g.kelas ?? g.class ?? g.Kelas ?? g.waliKelas ?? (profile && profile.kelas) ?? '').trim();
+    const kelas = String(
+        g.kelas ?? g.class ?? g.Kelas ?? g.waliKelas ??
+        (legacy && (legacy.kelas ?? legacy.class ?? legacy.Kelas ?? legacy.waliKelas)) ??
+        (profile && (profile.kelas ?? profile.class ?? profile.Kelas ?? profile.waliKelas)) ?? ''
+    ).trim();
     const password = g.password == null ? '' : String(g.password);
-    const role = String(g.role ?? g.entityType ?? (profile && profile.role) ?? 'guru').trim().toLowerCase() || 'guru';
+    const role = String(
+        g.role ?? g.entityType ?? (legacy && (legacy.role ?? legacy.entityType)) ??
+        (profile && (profile.role ?? profile.entityType)) ?? 'guru'
+    ).trim().toLowerCase() || 'guru';
     const uid = String(g.uid ?? g.authUid ?? (profile && profile.uid) ?? key ?? '').trim();
 
     return {
@@ -4738,34 +4761,54 @@ async function firebaseReadGuruList() {
     const schoolId = (window.SMKWDFirebaseConfig && window.SMKWDFirebaseConfig.schoolId) || 'SMKWD';
     const db = firebase.database();
 
-    const [teachersSnap, usersSnap] = await Promise.all([
+    const [teachersSnap, usersSnap, legacyUsersSnap] = await Promise.all([
         db.ref('schools/' + schoolId + '/shared/teachers').once('value'),
-        db.ref('schools/' + schoolId + '/security/users').once('value')
+        db.ref('schools/' + schoolId + '/security/users').once('value'),
+        db.ref('schools/' + schoolId + '/security/legacyUsers').once('value')
     ]);
 
     const rawTeachers = teachersSnap.val() || {};
     const rawUsers = usersSnap.val() || {};
+    const rawLegacyUsers = legacyUsersSnap.val() || {};
     const profileMap = {};
+    const legacyMap = {};
 
-    // Index profil guru berdasarkan UID, username, identifier, dan email.
+    function indexRecord(target, key, value) {
+        const p = value || {};
+        const keys = [
+            key, p.uid, p.authUid, p.userUid, p.username, p.userName,
+            p.loginUsername, p.identifier, p.email, p.nisn
+        ];
+        keys.forEach(k => {
+            if (k !== undefined && k !== null && String(k).trim() !== '') {
+                const normalized = String(k).trim();
+                target[normalized] = p;
+                target[normalized.toLowerCase()] = p;
+            }
+        });
+    }
+
+    // Security/users: hanya profil guru yang dipakai untuk pemetaan nama.
     Object.entries(rawUsers).forEach(([uid, value]) => {
         const p = value || {};
         const role = String(p.role ?? p.entityType ?? '').trim().toLowerCase();
         if (role && role !== 'guru') return;
-        const keys = [uid, p.uid, p.username, p.userName, p.loginUsername, p.identifier, p.email];
-        keys.forEach(k => {
-            if (k !== undefined && k !== null && String(k).trim() !== '') {
-                const key = String(k).trim();
-                profileMap[key] = p;
-                profileMap[key.toLowerCase()] = p;
-            }
-        });
+        indexRecord(profileMap, uid, p);
+    });
+
+    // Security/legacyUsers: dipakai sebagai sumber utama nama guru lama.
+    Object.entries(rawLegacyUsers).forEach(([key, value]) => {
+        const p = value || {};
+        const role = String(p.role ?? p.entityType ?? '').trim().toLowerCase();
+        if (role && role !== 'guru') return;
+        indexRecord(legacyMap, key, p);
     });
 
     return Object.entries(rawTeachers)
-        .map(([key, value]) => normalizeGuruRecord(value, key, profileMap))
+        .map(([key, value]) => normalizeGuruRecord(value, key, profileMap, legacyMap))
         .filter(g => g.username && String(g.role).toLowerCase() === 'guru');
 }
+
 function loadDataGuru() {
         stopAndBack(false);
         setActiveMenu('Data Guru');
