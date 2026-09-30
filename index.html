@@ -2094,10 +2094,12 @@ function processTableData(type) {
         event.preventDefault();
         showLoading();
         
-        const username = document.getElementById('username').value;
-        const password = document.getElementById('nisnPassword').value || document.getElementById('password').value;
-        const nisn = document.getElementById('nisn').value;
-
+        const adminForm = document.getElementById('formAdminLogin');
+        const isAdminLogin = adminForm && !adminForm.classList.contains('hidden');
+        const username = isAdminLogin ? document.getElementById('username').value.trim() : '';
+        const password = isAdminLogin ? document.getElementById('password').value : document.getElementById('nisnPassword').value;
+        const nisn = isAdminLogin ? '' : document.getElementById('nisn').value.trim();
+        
         google.script.run
             .withSuccessHandler(onLoginSuccess)
             .withFailureHandler(onLoginFailure)
@@ -3080,14 +3082,14 @@ function dhOpenCameraPopup() {
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Scan QR - Daftar Hadir</title>
 <!-- jsQR wajib dimuat di popup kamera. Popup dibuat sebagai dokumen HTML baru, sehingga tidak mewarisi script dari halaman induk. -->
-<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
-<script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"><\/script>
+<script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"><\/script>
 <script>
   // Fallback terakhir: gunakan instance jsQR dari halaman induk bila CDN popup gagal.
   if (typeof jsQR === 'undefined' && window.opener && typeof window.opener.jsQR === 'function') {
     window.jsQR = window.opener.jsQR;
   }
-</script>
+<\/script>
 <style>
   *{margin:0;padding:0;box-sizing:border-box;}
   body{background:${dhMode==='pulang'?'#1c0a00':'#0f172a'};color:white;font-family:'Segoe UI',sans-serif;
@@ -5392,14 +5394,14 @@ function loadScanAbsensi() {
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Scan QR - E-Absensi</title>
 <!-- jsQR wajib dimuat di popup kamera. Popup dibuat sebagai dokumen HTML baru, sehingga tidak mewarisi script dari halaman induk. -->
-<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
-<script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"><\/script>
+<script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"><\/script>
 <script>
   // Fallback terakhir: gunakan instance jsQR dari halaman induk bila CDN popup gagal.
   if (typeof jsQR === 'undefined' && window.opener && typeof window.opener.jsQR === 'function') {
     window.jsQR = window.opener.jsQR;
   }
-</script>
+<\/script>
 <style>
   *{margin:0;padding:0;box-sizing:border-box;}
   body{background:${dhMode==='pulang'?'#1c0a00':'#0f172a'};color:white;font-family:'Segoe UI',sans-serif;
