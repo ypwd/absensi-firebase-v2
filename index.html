@@ -985,7 +985,7 @@
               <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                   <i class="fas fa-search text-gray-400 text-xs"></i>
               </div>
-              <input type="text" oninput="handleTableSearch('guru', this.value)" class="bg-gray-50 border border-gray-200 text-gray-900 text-xs rounded-lg focus:ring-purple-500 focus:border-purple-500 block w-full pl-10 p-2" placeholder="Cari Username...">
+              <input type="text" oninput="handleTableSearch('guru', this.value)" class="bg-gray-50 border border-gray-200 text-gray-900 text-xs rounded-lg focus:ring-purple-500 focus:border-purple-500 block w-full pl-10 p-2" placeholder="Cari Nama Guru...">
           </div>
       </div>
 
@@ -994,7 +994,7 @@
             <thead class="bg-gray-50 text-gray-500 text-[10px] uppercase font-semibold">
                 <tr>
                     <th class="p-3 text-center w-10">No</th>
-                    <th class="p-3">Username</th>
+                    <th class="p-3">Nama Guru</th>
                     <th class="p-3">Wali Kelas</th>
                     <th class="p-3">Password</th>
                     <th class="p-3 text-center">Aksi</th>
@@ -4675,56 +4675,134 @@ function renderSiswaRows(data, startIdx) {
     }
 
     // --- DATA GURU ---
+function normalizeGuruRecord(raw, key, profileMap) {
+    const g = raw || {};
+    const username = String(
+        g.username ?? g.userName ?? g.usernameGuru ?? g.loginUsername ?? g.identifier ?? g.email ?? key ?? ''
+    ).trim();
+
+    // Nama guru TIDAK diambil dari data siswa.
+    // Prioritas: data guru sendiri -> profil security/users yang cocok dengan username/UID/email.
+    let profile = null;
+    const map = profileMap || {};
+    const candidates = [
+        g.uid, g.authUid, g.userUid, g.profileUid, g.email,
+        g.username, g.userName, g.loginUsername, g.identifier, key
+    ].filter(v => v !== undefined && v !== null && String(v).trim() !== '').map(v => String(v).trim());
+    for (const c of candidates) {
+        if (map[c]) { profile = map[c]; break; }
+        const lower = c.toLowerCase();
+        if (map[lower]) { profile = map[lower]; break; }
+    }
+
+    const namaCandidates = [
+        g.nama, g.namaGuru, g.name, g.Nama, g.displayName, g.fullName,
+        profile && profile.nama, profile && profile.namaGuru, profile && profile.name,
+        profile && profile.Nama, profile && profile.displayName, profile && profile.fullName,
+        profile && profile.identifier
+    ];
+    let nama = '';
+    for (const value of namaCandidates) {
+        const v = String(value == null ? '' : value).trim();
+        if (v && v.toLowerCase() !== 'undefined' && v.toLowerCase() !== 'null') {
+            nama = v;
+            break;
+        }
+    }
+
+    // Jika sumber Firebase memang belum memiliki nama, jangan tampilkan "undefined"
+    // dan jangan mengarang nama. Gunakan username sebagai fallback yang aman.
+    if (!nama) nama = username || 'Nama Guru Belum Diisi';
+
+    const kelas = String(g.kelas ?? g.class ?? g.Kelas ?? g.waliKelas ?? (profile && profile.kelas) ?? '').trim();
+    const password = g.password == null ? '' : String(g.password);
+    const role = String(g.role ?? g.entityType ?? (profile && profile.role) ?? 'guru').trim().toLowerCase() || 'guru';
+    const uid = String(g.uid ?? g.authUid ?? (profile && profile.uid) ?? key ?? '').trim();
+
+    return {
+        ...g,
+        key: key || g.key || username,
+        uid,
+        username,
+        nama,
+        password,
+        role,
+        kelas
+    };
+}
+
+async function firebaseReadGuruList() {
+    if (!window.firebase || !firebase.database) {
+        throw new Error('Firebase Realtime Database belum tersedia.');
+    }
+    const schoolId = (window.SMKWDFirebaseConfig && window.SMKWDFirebaseConfig.schoolId) || 'SMKWD';
+    const db = firebase.database();
+
+    const [teachersSnap, usersSnap] = await Promise.all([
+        db.ref('schools/' + schoolId + '/shared/teachers').once('value'),
+        db.ref('schools/' + schoolId + '/security/users').once('value')
+    ]);
+
+    const rawTeachers = teachersSnap.val() || {};
+    const rawUsers = usersSnap.val() || {};
+    const profileMap = {};
+
+    // Index profil guru berdasarkan UID, username, identifier, dan email.
+    Object.entries(rawUsers).forEach(([uid, value]) => {
+        const p = value || {};
+        const role = String(p.role ?? p.entityType ?? '').trim().toLowerCase();
+        if (role && role !== 'guru') return;
+        const keys = [uid, p.uid, p.username, p.userName, p.loginUsername, p.identifier, p.email];
+        keys.forEach(k => {
+            if (k !== undefined && k !== null && String(k).trim() !== '') {
+                const key = String(k).trim();
+                profileMap[key] = p;
+                profileMap[key.toLowerCase()] = p;
+            }
+        });
+    });
+
+    return Object.entries(rawTeachers)
+        .map(([key, value]) => normalizeGuruRecord(value, key, profileMap))
+        .filter(g => g.username && String(g.role).toLowerCase() === 'guru');
+}
 function loadDataGuru() {
         stopAndBack(false);
         setActiveMenu('Data Guru');
         showView('view-data-guru');
-        
-        // --- LOGIKA POPULATE DROPDOWN KELAS GURU ---
+
         const dropdown = document.getElementById('filterKelasGuru');
         if (dropdown && existingClasses && existingClasses.length > 0) {
-            const currentValue = dropdown.value; 
-            
+            const currentValue = dropdown.value;
             let options = '<option value="">Semua Kelas</option>';
             existingClasses.forEach(kelas => {
                 options += `<option value="${kelas}">${kelas}</option>`;
             });
             dropdown.innerHTML = options;
-            
             if (currentValue) dropdown.value = currentValue;
         }
-        // --------------------------------------------------
 
-        // Cek Cache Data
         if (tableState.guru.fullData.length > 0) {
+            // Normalisasi ulang juga terhadap cache lama agar tidak ada field undefined.
+            tableState.guru.fullData = tableState.guru.fullData.map((g, i) => normalizeGuruRecord(g, g && g.key ? g.key : i));
             processTableData('guru');
-        } else {
-            // Tampilkan Loading di Tabel
-            document.getElementById('tbody-guru').innerHTML = '<tr><td colspan="5" class="p-8 text-center text-gray-500"><i class="fas fa-circle-notch fa-spin mr-2"></i>Memuat data guru...</td></tr>';
-            
-            // === KEAMANAN: AMBIL TOKEN ===
-            const token = currentUser.token;
-
-            // Panggil Backend dengan Token
-            google.script.run.withSuccessHandler(result => {
-                if (result.success) {
-                    tableState.guru.fullData = result.data;
-                    processTableData('guru');
-                } else {
-                    // Jika gagal (Token invalid/Bukan Admin)
-                    document.getElementById('tbody-guru').innerHTML = `<tr><td colspan="5" class="p-8 text-center text-red-500 font-bold"><i class="fas fa-exclamation-triangle mr-2"></i>${result.message}</td></tr>`;
-                    showAlert('error', result.message);
-                }
-            })
-            .withFailureHandler(error => {
-                document.getElementById('tbody-guru').innerHTML = `<tr><td colspan="5" class="p-8 text-center text-red-500">Gagal koneksi: ${error}</td></tr>`;
-            })
-            .getGuruList(token); // <-- PARAMETER TOKEN DITAMBAHKAN DI SINI
+            return;
         }
+
+        document.getElementById('tbody-guru').innerHTML = '<tr><td colspan="5" class="p-8 text-center text-gray-500"><i class="fas fa-circle-notch fa-spin mr-2"></i>Memuat data guru...</td></tr>';
+
+        firebaseReadGuruList().then(data => {
+            tableState.guru.fullData = data;
+            processTableData('guru');
+        }).catch(error => {
+            console.error('Firebase Direct Data Guru:', error);
+            document.getElementById('tbody-guru').innerHTML = `<tr><td colspan="5" class="p-8 text-center text-red-500">Gagal memuat data guru: ${String(error.message || error)}</td></tr>`;
+        });
     }
 
 // UPDATE: Menampilkan kolom kelas di tabel
 function renderGuruRows(data, startIdx) {
+    data = (data || []).map((g, i) => normalizeGuruRecord(g, g && g.key ? g.key : i));
     const tbody = document.getElementById('tbody-guru');
     if (data.length === 0) {
         tbody.innerHTML = '<tr><td colspan="5" class="p-8 text-center text-gray-400">Data tidak ditemukan.</td></tr>';
@@ -4740,7 +4818,7 @@ function renderGuruRows(data, startIdx) {
         return `
     <tr class="hover:bg-gray-50 transition border-b border-gray-50 group">
         <td class="p-4 text-center text-gray-500 text-sm">${startIdx + i + 1}</td>
-        <td class="p-4 text-sm font-bold text-gray-800">${guru.username}</td>
+        <td class="p-4 text-sm font-bold text-gray-800">${guru.nama || guru.username || 'Nama Guru Belum Diisi'}</td>
         <td class="p-4 text-sm">
             <div class="flex flex-wrap gap-1">${kelasBadges}</div>
         </td>
@@ -4748,7 +4826,7 @@ function renderGuruRows(data, startIdx) {
         <td class="p-4 text-center">
             <div class="flex justify-center space-x-2 opacity-80 group-hover:opacity-100">
                 <button onclick='editGuru(${JSON.stringify(guru)})' class="p-2 bg-amber-50 text-amber-600 rounded-lg hover:bg-amber-100 transition" title="Edit Akun"><i class="fas fa-edit"></i></button>
-                <button onclick="deleteGuruConfirm('${guru.username}')" class="p-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition" title="Hapus Akun"><i class="fas fa-trash"></i></button>
+                <button onclick="deleteGuruConfirm('${guru.username}', ${JSON.stringify(guru.nama || guru.username)})" class="p-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition" title="Hapus Akun"><i class="fas fa-trash"></i></button>
             </div>
         </td>
     </tr>`}).join('');
@@ -7541,8 +7619,9 @@ async function downloadKartuSiswaBulk() {
     }, 500);
 }
 
-    function deleteGuruConfirm(username) {
-        if (confirm(`Hapus akses untuk guru: ${username}?`)) {
+    function deleteGuruConfirm(username, nama) {
+        const label = String(nama || username || 'guru');
+        if (confirm(`Hapus akses untuk guru: ${label}?`)) {
             showLoading(); // Tampilkan overlay loading
 
             // --- KEAMANAN: AMBIL TOKEN USER ---
