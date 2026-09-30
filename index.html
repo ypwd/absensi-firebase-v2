@@ -1924,25 +1924,70 @@ function processTableData(type) {
     // ==========================================================================
     // 2. SESSION MANAGEMENT
     // ==========================================================================
-    function checkSession() {
-        const storedSession = localStorage.getItem('absensiAppSession');
-        if (storedSession) {
-            try {
-                const sessionData = JSON.parse(storedSession);
-                if (sessionData && sessionData.success) {
-                    currentUser = sessionData;
-                    document.getElementById('loginPage').classList.add('hidden');
-                    document.getElementById('dashboardContainer').classList.remove('hidden');
-                    
-                    if (window.innerWidth < 768) {
-                         document.getElementById('sidebar').classList.add('-translate-x-full');
-                    }
-                    
-                    initDashboard();
-                }
-            } catch (e) {
-                localStorage.removeItem('absensiAppSession');
+    async function checkSession() {
+        // Firebase Authentication adalah sumber kebenaran sesi.
+        // localStorage hanya dipakai sebagai cache UI, bukan sebagai otorisasi.
+        try {
+            if (!window.firebase || !firebase.auth) {
+                console.warn('Firebase Auth belum tersedia.');
+                return;
             }
+
+            const user = await new Promise((resolve) => {
+                let settled = false;
+                const unsubscribe = firebase.auth().onAuthStateChanged((u) => {
+                    if (settled) return;
+                    settled = true;
+                    try { unsubscribe(); } catch (_) {}
+                    resolve(u || null);
+                });
+                setTimeout(() => {
+                    if (settled) return;
+                    settled = true;
+                    try { unsubscribe(); } catch (_) {}
+                    resolve(firebase.auth().currentUser || null);
+                }, 5000);
+            });
+
+            if (!user) {
+                localStorage.removeItem('absensiAppSession');
+                currentUser = null;
+                return;
+            }
+
+            if (!window.SMKWDFirebaseDirect || typeof window.SMKWDFirebaseDirect.getProfile !== 'function') {
+                throw new Error('Firebase Direct belum siap.');
+            }
+
+            const profile = await window.SMKWDFirebaseDirect.getProfile();
+            const sessionData = {
+                success: true,
+                uid: user.uid,
+                token: user.uid,
+                firebaseAuth: true,
+                role: String(profile.role || '').toLowerCase(),
+                username: profile.username || profile.identifier || profile.email || user.email || '',
+                nama: profile.nama || profile.username || profile.identifier || '',
+                kelas: profile.kelas || '',
+                nisn: String(profile.role || '').toLowerCase() === 'siswa' ? (profile.identifier || '') : null,
+                email: profile.email || user.email || ''
+            };
+
+            currentUser = sessionData;
+            localStorage.setItem('absensiAppSession', JSON.stringify(sessionData));
+            document.getElementById('loginPage').classList.add('hidden');
+            document.getElementById('dashboardContainer').classList.remove('hidden');
+
+            if (window.innerWidth < 768) {
+                document.getElementById('sidebar').classList.add('-translate-x-full');
+            }
+            initDashboard();
+        } catch (e) {
+            console.warn('checkSession Firebase:', e);
+            localStorage.removeItem('absensiAppSession');
+            currentUser = null;
+            document.getElementById('dashboardContainer').classList.add('hidden');
+            document.getElementById('loginPage').classList.remove('hidden');
         }
     }
 
@@ -2090,18 +2135,118 @@ function processTableData(type) {
         }
     }
 
-    function handleLogin(event) {
+    async function handleLogin(event) {
         event.preventDefault();
         showLoading();
-        
-        const username = document.getElementById('username').value;
-        const password = document.getElementById('nisnPassword').value || document.getElementById('password').value;
-        const nisn = document.getElementById('nisn').value;
+        const errorDiv = document.getElementById('loginError');
+        const errorText = document.getElementById('errorText');
+        errorDiv.classList.add('hidden');
 
-        google.script.run
-            .withSuccessHandler(onLoginSuccess)
-            .withFailureHandler(onLoginFailure)
-            .login(username, password, nisn);
+        try {
+            if (!window.firebase || !firebase.auth) {
+                throw new Error('Firebase Authentication belum tersedia.');
+            }
+            if (!window.SMKWDFirebaseDirect || typeof window.SMKWDFirebaseDirect.getProfile !== 'function') {
+                throw new Error('Firebase Direct belum siap. Pastikan firebase-direct.js termuat.');
+            }
+
+            const siswaFormVisible = !document.getElementById('formSiswaLogin').classList.contains('hidden');
+            const usernameRaw = String(document.getElementById('username').value || '').trim();
+            const password = siswaFormVisible
+                ? String(document.getElementById('nisnPassword').value || '').trim()
+                : String(document.getElementById('password').value || '');
+            const nisn = String(document.getElementById('nisn').value || '').trim();
+
+            let credential = null;
+
+            if (siswaFormVisible) {
+                if (!nisn) throw new Error('NISN wajib diisi.');
+                if (!password) throw new Error('PIN / password siswa wajib diisi.');
+                credential = await firebase.auth().signInWithEmailAndPassword(
+                    nisn + '@students.smkwd.local',
+                    password
+                );
+            } else {
+                if (!usernameRaw) throw new Error('Username wajib diisi.');
+                if (!password) throw new Error('Password wajib diisi.');
+
+                // Kompatibel dengan data Auth yang sudah ada:
+                // wd048 -> wd048@guru.smkwd.local
+                // Romal Ginanjar -> romal_ginanjar@guru.smkwd.local
+                // email lengkap -> digunakan apa adanya.
+                const raw = usernameRaw.toLowerCase();
+                const candidates = [];
+                if (raw.includes('@')) {
+                    candidates.push(raw);
+                } else {
+                    const local = raw
+                        .normalize('NFKD')
+                        .replace(/[\u0300-\u036f]/g, '')
+                        .replace(/[^a-z0-9]+/g, '_')
+                        .replace(/^_+|_+$/g, '');
+                    if (local) {
+                        candidates.push(local + '@guru.smkwd.local');
+                        candidates.push(local + '@admin.smkwd.local');
+                        candidates.push(local + '@wakel.smkwd.local');
+                    }
+                }
+
+                let lastError = null;
+                for (const email of [...new Set(candidates)]) {
+                    try {
+                        credential = await firebase.auth().signInWithEmailAndPassword(email, password);
+                        break;
+                    } catch (e) {
+                        lastError = e;
+                        // Lanjut hanya bila kredensial/email kandidat berikutnya masih layak dicoba.
+                        // Jangan mengubah pesan Firebase menjadi pesan teknis kepada pengguna.
+                    }
+                }
+                if (!credential) throw lastError || new Error('Username atau password salah.');
+            }
+
+            const user = credential.user;
+            if (!user) throw new Error('Firebase tidak mengembalikan akun pengguna.');
+
+            const profile = await window.SMKWDFirebaseDirect.getProfile();
+            const role = String(profile.role || '').toLowerCase().trim();
+            if (!role || profile.active !== true) {
+                await firebase.auth().signOut();
+                throw new Error('Akun tidak aktif atau profil Firebase belum lengkap.');
+            }
+
+            // Bentuk objek dipertahankan agar menu lama tetap kompatibel.
+            // token tetap berupa UID hanya untuk kompatibilitas UI lama; otorisasi
+            // Firebase tidak menggunakan field ini. Sumber otoritas adalah Auth + Rules.
+            const result = {
+                success: true,
+                uid: user.uid,
+                token: user.uid,
+                firebaseAuth: true,
+                role: role,
+                username: profile.username || profile.identifier || usernameRaw || user.email || '',
+                nama: profile.nama || profile.username || profile.identifier || '',
+                kelas: profile.kelas || '',
+                nisn: role === 'siswa' ? (profile.identifier || nisn) : null,
+                email: profile.email || user.email || ''
+            };
+
+            currentUser = result;
+            localStorage.setItem('absensiAppSession', JSON.stringify(result));
+            onLoginSuccess(result);
+        } catch (error) {
+            hideLoading();
+            const code = String(error && error.code || '');
+            let message = 'Username atau password salah.';
+            if (code === 'auth/user-disabled') message = 'Akun ini dinonaktifkan.';
+            else if (code === 'auth/too-many-requests') message = 'Terlalu banyak percobaan login. Silakan coba lagi beberapa saat.';
+            else if (code === 'auth/network-request-failed') message = 'Koneksi ke Firebase gagal. Periksa koneksi internet.';
+            else if (code === 'auth/invalid-email') message = 'Format akun login tidak valid.';
+            else if (error && error.message && !code) message = error.message;
+            errorText.textContent = message;
+            errorDiv.classList.remove('hidden');
+            setTimeout(() => errorDiv.classList.add('hidden'), 5000);
+        }
     }
 
     function onLoginSuccess(result) {
@@ -2134,19 +2279,26 @@ function processTableData(type) {
         alert('Gagal terhubung ke server: ' + error.message);
     }
 
-    function logout() {
-        stopAndBack(false);
-        localStorage.removeItem('absensiAppSession');
-        currentUser = null;
-        appCache = { siswa: null, guru: null };
-        document.getElementById('dashboardContainer').classList.add('hidden');
-        document.getElementById('loginPage').classList.remove('hidden');
-        
-        document.getElementById('username').value = '';
-        document.getElementById('password').value = '';
-        document.getElementById('nisn').value = '';
-        if (document.getElementById('nisnPassword')) document.getElementById('nisnPassword').value = '';
-        document.getElementById('sidebar').classList.add('-translate-x-full');
+    async function logout() {
+        try { stopAndBack(false); } catch (_) {}
+        try {
+            if (window.firebase && firebase.auth) {
+                await firebase.auth().signOut();
+            }
+        } catch (e) {
+            console.warn('Firebase logout:', e);
+        } finally {
+            localStorage.removeItem('absensiAppSession');
+            currentUser = null;
+            appCache = { siswa: null, guru: null };
+            document.getElementById('dashboardContainer').classList.add('hidden');
+            document.getElementById('loginPage').classList.remove('hidden');
+            document.getElementById('username').value = '';
+            document.getElementById('password').value = '';
+            document.getElementById('nisn').value = '';
+            if (document.getElementById('nisnPassword')) document.getElementById('nisnPassword').value = '';
+            document.getElementById('sidebar').classList.add('-translate-x-full');
+        }
     }
 
     // ==========================================================================
