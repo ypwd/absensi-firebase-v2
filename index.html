@@ -4675,78 +4675,56 @@ function renderSiswaRows(data, startIdx) {
     }
 
     // --- DATA GURU ---
-function normalizeGuruRecord(raw, key) {
-    const g = raw || {};
-    const username = String(
-        g.username ?? g.userName ?? g.usernameGuru ?? g.identifier ?? g.email ?? key ?? ''
-    ).trim();
-    const namaValue = g.nama ?? g.namaGuru ?? g.name ?? g.Nama ?? g.displayName ?? g.fullName;
-    const nama = String(
-        namaValue == null || String(namaValue).trim() === '' ? username : namaValue
-    ).trim();
-    const kelas = String(g.kelas ?? g.class ?? g.Kelas ?? g.waliKelas ?? '').trim();
-    const password = g.password == null ? '' : String(g.password);
-    const role = String(g.role ?? g.entityType ?? 'guru').trim().toLowerCase() || 'guru';
-    return {
-        ...g,
-        key: key || g.key || username,
-        username,
-        nama,
-        password,
-        role,
-        kelas
-    };
-}
-
-async function firebaseReadGuruList() {
-    if (!window.firebase || !firebase.database) {
-        throw new Error('Firebase Realtime Database belum tersedia.');
-    }
-    const schoolId = (window.SMKWDFirebaseConfig && window.SMKWDFirebaseConfig.schoolId) || 'SMKWD';
-    const snap = await firebase.database().ref('schools/' + schoolId + '/shared/teachers').once('value');
-    const raw = snap.val() || {};
-    return Object.entries(raw)
-        .map(([key, value]) => normalizeGuruRecord(value, key))
-        .filter(g => g.username && String(g.role).toLowerCase() === 'guru');
-}
-
 function loadDataGuru() {
         stopAndBack(false);
         setActiveMenu('Data Guru');
         showView('view-data-guru');
-
+        
+        // --- LOGIKA POPULATE DROPDOWN KELAS GURU ---
         const dropdown = document.getElementById('filterKelasGuru');
         if (dropdown && existingClasses && existingClasses.length > 0) {
-            const currentValue = dropdown.value;
+            const currentValue = dropdown.value; 
+            
             let options = '<option value="">Semua Kelas</option>';
             existingClasses.forEach(kelas => {
                 options += `<option value="${kelas}">${kelas}</option>`;
             });
             dropdown.innerHTML = options;
+            
             if (currentValue) dropdown.value = currentValue;
         }
+        // --------------------------------------------------
 
+        // Cek Cache Data
         if (tableState.guru.fullData.length > 0) {
-            // Normalisasi ulang juga terhadap cache lama agar tidak ada field undefined.
-            tableState.guru.fullData = tableState.guru.fullData.map((g, i) => normalizeGuruRecord(g, g && g.key ? g.key : i));
             processTableData('guru');
-            return;
+        } else {
+            // Tampilkan Loading di Tabel
+            document.getElementById('tbody-guru').innerHTML = '<tr><td colspan="5" class="p-8 text-center text-gray-500"><i class="fas fa-circle-notch fa-spin mr-2"></i>Memuat data guru...</td></tr>';
+            
+            // === KEAMANAN: AMBIL TOKEN ===
+            const token = currentUser.token;
+
+            // Panggil Backend dengan Token
+            google.script.run.withSuccessHandler(result => {
+                if (result.success) {
+                    tableState.guru.fullData = result.data;
+                    processTableData('guru');
+                } else {
+                    // Jika gagal (Token invalid/Bukan Admin)
+                    document.getElementById('tbody-guru').innerHTML = `<tr><td colspan="5" class="p-8 text-center text-red-500 font-bold"><i class="fas fa-exclamation-triangle mr-2"></i>${result.message}</td></tr>`;
+                    showAlert('error', result.message);
+                }
+            })
+            .withFailureHandler(error => {
+                document.getElementById('tbody-guru').innerHTML = `<tr><td colspan="5" class="p-8 text-center text-red-500">Gagal koneksi: ${error}</td></tr>`;
+            })
+            .getGuruList(token); // <-- PARAMETER TOKEN DITAMBAHKAN DI SINI
         }
-
-        document.getElementById('tbody-guru').innerHTML = '<tr><td colspan="5" class="p-8 text-center text-gray-500"><i class="fas fa-circle-notch fa-spin mr-2"></i>Memuat data guru...</td></tr>';
-
-        firebaseReadGuruList().then(data => {
-            tableState.guru.fullData = data;
-            processTableData('guru');
-        }).catch(error => {
-            console.error('Firebase Direct Data Guru:', error);
-            document.getElementById('tbody-guru').innerHTML = `<tr><td colspan="5" class="p-8 text-center text-red-500">Gagal memuat data guru: ${String(error.message || error)}</td></tr>`;
-        });
     }
 
 // UPDATE: Menampilkan kolom kelas di tabel
 function renderGuruRows(data, startIdx) {
-    data = (data || []).map((g, i) => normalizeGuruRecord(g, g && g.key ? g.key : i));
     const tbody = document.getElementById('tbody-guru');
     if (data.length === 0) {
         tbody.innerHTML = '<tr><td colspan="5" class="p-8 text-center text-gray-400">Data tidak ditemukan.</td></tr>';
