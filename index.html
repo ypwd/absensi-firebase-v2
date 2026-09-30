@@ -985,7 +985,7 @@
               <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                   <i class="fas fa-search text-gray-400 text-xs"></i>
               </div>
-              <input type="text" oninput="handleTableSearch('guru', this.value)" class="bg-gray-50 border border-gray-200 text-gray-900 text-xs rounded-lg focus:ring-purple-500 focus:border-purple-500 block w-full pl-10 p-2" placeholder="Cari Nama Guru...">
+              <input type="text" oninput="handleTableSearch('guru', this.value)" class="bg-gray-50 border border-gray-200 text-gray-900 text-xs rounded-lg focus:ring-purple-500 focus:border-purple-500 block w-full pl-10 p-2" placeholder="Cari Username...">
           </div>
       </div>
 
@@ -994,7 +994,7 @@
             <thead class="bg-gray-50 text-gray-500 text-[10px] uppercase font-semibold">
                 <tr>
                     <th class="p-3 text-center w-10">No</th>
-                    <th class="p-3">Nama Guru</th>
+                    <th class="p-3">Username</th>
                     <th class="p-3">Wali Kelas</th>
                     <th class="p-3">Password</th>
                     <th class="p-3 text-center">Aksi</th>
@@ -4675,77 +4675,21 @@ function renderSiswaRows(data, startIdx) {
     }
 
     // --- DATA GURU ---
-function normalizeGuruRecord(raw, key, profileMap, legacyMap) {
+function normalizeGuruRecord(raw, key) {
     const g = raw || {};
     const username = String(
-        g.username ?? g.userName ?? g.usernameGuru ?? g.loginUsername ?? g.identifier ?? g.email ?? key ?? ''
+        g.username ?? g.userName ?? g.usernameGuru ?? g.identifier ?? g.email ?? key ?? ''
     ).trim();
-
-    // Sumber nama guru hanya dari data Security:
-    // 1) security/legacyUsers -> field nama/namaGuru/name/dll.
-    // 2) security/users -> field nama/namaGuru/name/dll.
-    // 3) security/users.identifier sebagai fallback nama.
-    // Tidak mengambil nama dari data siswa dan tidak mengubah mekanisme login.
-    let profile = null;
-    let legacy = null;
-    const map = profileMap || {};
-    const lmap = legacyMap || {};
-    const candidates = [
-        g.uid, g.authUid, g.userUid, g.profileUid, g.email,
-        g.username, g.userName, g.loginUsername, g.identifier, key
-    ].filter(v => v !== undefined && v !== null && String(v).trim() !== '')
-     .map(v => String(v).trim());
-
-    for (const c of candidates) {
-        if (lmap[c]) { legacy = lmap[c]; break; }
-        const lower = c.toLowerCase();
-        if (lmap[lower]) { legacy = lmap[lower]; break; }
-    }
-    for (const c of candidates) {
-        if (map[c]) { profile = map[c]; break; }
-        const lower = c.toLowerCase();
-        if (map[lower]) { profile = map[lower]; break; }
-    }
-
-    const legacyNameCandidates = [
-        legacy && legacy.nama, legacy && legacy.namaGuru, legacy && legacy.name,
-        legacy && legacy.Nama, legacy && legacy.displayName, legacy && legacy.fullName,
-        legacy && legacy.identifier
-    ];
-    const userNameCandidates = [
-        profile && profile.nama, profile && profile.namaGuru, profile && profile.name,
-        profile && profile.Nama, profile && profile.displayName, profile && profile.fullName,
-        profile && profile.identifier
-    ];
-
-    let nama = '';
-    for (const value of legacyNameCandidates.concat(userNameCandidates)) {
-        const v = String(value == null ? '' : value).trim();
-        if (v && v.toLowerCase() !== 'undefined' && v.toLowerCase() !== 'null') {
-            nama = v;
-            break;
-        }
-    }
-
-    // Jangan pernah menampilkan literal undefined dan jangan mengarang nama.
-    if (!nama) nama = username || 'Nama Guru Belum Diisi';
-
-    const kelas = String(
-        g.kelas ?? g.class ?? g.Kelas ?? g.waliKelas ??
-        (legacy && (legacy.kelas ?? legacy.class ?? legacy.Kelas ?? legacy.waliKelas)) ??
-        (profile && (profile.kelas ?? profile.class ?? profile.Kelas ?? profile.waliKelas)) ?? ''
+    const namaValue = g.nama ?? g.namaGuru ?? g.name ?? g.Nama ?? g.displayName ?? g.fullName;
+    const nama = String(
+        namaValue == null || String(namaValue).trim() === '' ? username : namaValue
     ).trim();
+    const kelas = String(g.kelas ?? g.class ?? g.Kelas ?? g.waliKelas ?? '').trim();
     const password = g.password == null ? '' : String(g.password);
-    const role = String(
-        g.role ?? g.entityType ?? (legacy && (legacy.role ?? legacy.entityType)) ??
-        (profile && (profile.role ?? profile.entityType)) ?? 'guru'
-    ).trim().toLowerCase() || 'guru';
-    const uid = String(g.uid ?? g.authUid ?? (profile && profile.uid) ?? key ?? '').trim();
-
+    const role = String(g.role ?? g.entityType ?? 'guru').trim().toLowerCase() || 'guru';
     return {
         ...g,
         key: key || g.key || username,
-        uid,
         username,
         nama,
         password,
@@ -4759,53 +4703,10 @@ async function firebaseReadGuruList() {
         throw new Error('Firebase Realtime Database belum tersedia.');
     }
     const schoolId = (window.SMKWDFirebaseConfig && window.SMKWDFirebaseConfig.schoolId) || 'SMKWD';
-    const db = firebase.database();
-
-    const [teachersSnap, usersSnap, legacyUsersSnap] = await Promise.all([
-        db.ref('schools/' + schoolId + '/shared/teachers').once('value'),
-        db.ref('schools/' + schoolId + '/security/users').once('value'),
-        db.ref('schools/' + schoolId + '/security/legacyUsers').once('value')
-    ]);
-
-    const rawTeachers = teachersSnap.val() || {};
-    const rawUsers = usersSnap.val() || {};
-    const rawLegacyUsers = legacyUsersSnap.val() || {};
-    const profileMap = {};
-    const legacyMap = {};
-
-    function indexRecord(target, key, value) {
-        const p = value || {};
-        const keys = [
-            key, p.uid, p.authUid, p.userUid, p.username, p.userName,
-            p.loginUsername, p.identifier, p.email, p.nisn
-        ];
-        keys.forEach(k => {
-            if (k !== undefined && k !== null && String(k).trim() !== '') {
-                const normalized = String(k).trim();
-                target[normalized] = p;
-                target[normalized.toLowerCase()] = p;
-            }
-        });
-    }
-
-    // Security/users: hanya profil guru yang dipakai untuk pemetaan nama.
-    Object.entries(rawUsers).forEach(([uid, value]) => {
-        const p = value || {};
-        const role = String(p.role ?? p.entityType ?? '').trim().toLowerCase();
-        if (role && role !== 'guru') return;
-        indexRecord(profileMap, uid, p);
-    });
-
-    // Security/legacyUsers: dipakai sebagai sumber utama nama guru lama.
-    Object.entries(rawLegacyUsers).forEach(([key, value]) => {
-        const p = value || {};
-        const role = String(p.role ?? p.entityType ?? '').trim().toLowerCase();
-        if (role && role !== 'guru') return;
-        indexRecord(legacyMap, key, p);
-    });
-
-    return Object.entries(rawTeachers)
-        .map(([key, value]) => normalizeGuruRecord(value, key, profileMap, legacyMap))
+    const snap = await firebase.database().ref('schools/' + schoolId + '/shared/teachers').once('value');
+    const raw = snap.val() || {};
+    return Object.entries(raw)
+        .map(([key, value]) => normalizeGuruRecord(value, key))
         .filter(g => g.username && String(g.role).toLowerCase() === 'guru');
 }
 
@@ -4861,7 +4762,7 @@ function renderGuruRows(data, startIdx) {
         return `
     <tr class="hover:bg-gray-50 transition border-b border-gray-50 group">
         <td class="p-4 text-center text-gray-500 text-sm">${startIdx + i + 1}</td>
-        <td class="p-4 text-sm font-bold text-gray-800">${guru.nama || guru.username || 'Nama Guru Belum Diisi'}</td>
+        <td class="p-4 text-sm font-bold text-gray-800">${guru.username}</td>
         <td class="p-4 text-sm">
             <div class="flex flex-wrap gap-1">${kelasBadges}</div>
         </td>
@@ -4869,7 +4770,7 @@ function renderGuruRows(data, startIdx) {
         <td class="p-4 text-center">
             <div class="flex justify-center space-x-2 opacity-80 group-hover:opacity-100">
                 <button onclick='editGuru(${JSON.stringify(guru)})' class="p-2 bg-amber-50 text-amber-600 rounded-lg hover:bg-amber-100 transition" title="Edit Akun"><i class="fas fa-edit"></i></button>
-                <button onclick="deleteGuruConfirm('${guru.username}', ${JSON.stringify(guru.nama || guru.username)})" class="p-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition" title="Hapus Akun"><i class="fas fa-trash"></i></button>
+                <button onclick="deleteGuruConfirm('${guru.username}')" class="p-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition" title="Hapus Akun"><i class="fas fa-trash"></i></button>
             </div>
         </td>
     </tr>`}).join('');
@@ -7662,9 +7563,8 @@ async function downloadKartuSiswaBulk() {
     }, 500);
 }
 
-    function deleteGuruConfirm(username, nama) {
-        const label = String(nama || username || 'guru');
-        if (confirm(`Hapus akses untuk guru: ${label}?`)) {
+    function deleteGuruConfirm(username) {
+        if (confirm(`Hapus akses untuk guru: ${username}?`)) {
             showLoading(); // Tampilkan overlay loading
 
             // --- KEAMANAN: AMBIL TOKEN USER ---
