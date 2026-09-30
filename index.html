@@ -2377,17 +2377,100 @@ function initDashboard() {
     loadKelasSuggestions();
 }
     
-    // --- DROPDOWN KELAS LOGIC ---
-    function loadKelasSuggestions() {
-        console.log("Memuat daftar kelas dari Konfigurasi...");
-        
-        google.script.run.withSuccessHandler(function(classes) {
-            existingClasses = classes; // Simpan ke variabel global
-            
-            // Populate semua dropdown yang ada di HTML saat ini
+    // --- FIREBASE DIRECT: KELAS & DATA SISWA ---
+    function firebaseAppDbRef(path) {
+        if (!window.firebase || !firebase.database) throw new Error('Firebase Realtime Database belum tersedia.');
+        const schoolId = (window.SMKWDFirebaseConfig && window.SMKWDFirebaseConfig.schoolId) || 'SMKWD';
+        return firebase.database().ref('schools/' + schoolId + '/' + String(path || '').replace(/^\/+/, ''));
+    }
+
+    function firebaseTodayISO() {
+        return new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit'
+        }).format(new Date());
+    }
+
+    function firebaseCleanClassName(v) { return String(v == null ? '' : v).trim(); }
+
+    function firebaseStudentRecord(s, key) {
+        s = s || {};
+        return {
+            key: key,
+            nisn: String(s.nisn ?? s.NISN ?? s.identifier ?? key ?? '').trim(),
+            nama: String(s.nama ?? s.namaSiswa ?? s.name ?? s.Nama ?? '').trim(),
+            kelas: firebaseCleanClassName(s.kelas ?? s.class ?? s.Kelas),
+            active: s.active === undefined || s.active === null || s.active === '' ? true : s.active
+        };
+    }
+
+    function firebaseStudentIsActive(s) {
+        if (s.active === true || s.active === undefined || s.active === null || s.active === '') return true;
+        if (typeof s.active === 'boolean') return s.active;
+        return !['false','0','nonaktif','tidak aktif','inactive'].includes(String(s.active).trim().toLowerCase());
+    }
+
+    async function firebaseReadAllStudents() {
+        const snap = await firebaseAppDbRef('shared/students').once('value');
+        const raw = snap.val() || {};
+        return Object.entries(raw).map(([key, value]) => firebaseStudentRecord(value, key))
+            .filter(s => s.nisn && firebaseStudentIsActive(s));
+    }
+
+    function firebaseClassKey(name) {
+        return encodeURIComponent(String(name).trim().toLowerCase()).replace(/%/g, '_');
+    }
+
+    async function firebaseReadClassCatalog() {
+        const [studentList, manualSnap] = await Promise.all([
+            firebaseReadAllStudents(),
+            firebaseAppDbRef('shared/classes').once('value').catch(() => ({ val: () => ({}) }))
+        ]);
+        const manualRaw = manualSnap.val() || {};
+        const byName = new Map();
+
+        studentList.forEach(s => {
+            if (!s.kelas) return;
+            const key = s.kelas.toLowerCase();
+            if (!byName.has(key)) byName.set(key, {
+                id: 'auto_' + firebaseClassKey(s.kelas),
+                rowIndex: 'auto_' + firebaseClassKey(s.kelas),
+                nama: s.kelas,
+                source: 'students'
+            });
+        });
+
+        Object.entries(manualRaw).forEach(([id, item]) => {
+            const nama = firebaseCleanClassName(item && (item.nama ?? item.name));
+            if (!nama) return;
+            const key = nama.toLowerCase();
+            if (byName.has(key)) {
+                // Kelas yang sudah dipakai siswa tetap satu entri; tandai juga sebagai manual.
+                const existing = byName.get(key);
+                existing.manualId = id;
+                existing.source = 'students+manual';
+            } else {
+                byName.set(key, {
+                    id: id,
+                    rowIndex: id,
+                    nama: nama,
+                    source: 'manual',
+                    manualId: id
+                });
+            }
+        });
+
+        return Array.from(byName.values()).sort((a,b) => a.nama.localeCompare(b.nama, 'id'));
+    }
+
+    async function loadKelasSuggestions() {
+        try {
+            existingClasses = (await firebaseReadClassCatalog()).map(k => k.nama);
             populateAllClassDropdowns();
-            
-        }).getDaftarKelas(); // Memanggil fungsi backend yang baru kita ubah
+        } catch (e) {
+            console.error('Firebase Direct: gagal memuat daftar kelas', e);
+            existingClasses = [];
+            populateAllClassDropdowns();
+        }
     }
 
 function populateAllClassDropdowns() {
@@ -2820,10 +2903,7 @@ function loadDaftarHadirGuru() {
 function dhPopulateKelasSelector() {
     const sel = document.getElementById('dhKelasSelect');
     if (!sel) return;
-
     const role = currentUser && currentUser.role ? currentUser.role : 'guru';
-    const autoValue = '<option value="AUTO">🔄 Otomatis berdasarkan QR</option>';
-
     const render = (classes) => {
         let list = Array.isArray(classes) ? classes.filter(Boolean) : [];
         if (role === 'guru' && currentUser && currentUser.kelas) {
@@ -2831,35 +2911,52 @@ function dhPopulateKelasSelector() {
             list = list.filter(k => allowed.some(a => a.toUpperCase() === String(k).toUpperCase()));
         }
         const current = sel.value || 'AUTO';
-        sel.innerHTML = autoValue + list.map(k => `<option value="${String(k).replace(/"/g,'&quot;')}">Kelas ${k}</option>`).join('');
+        sel.innerHTML = '<option value="AUTO">🔄 Otomatis berdasarkan QR</option>' +
+            list.map(k => `<option value="${String(k).replace(/"/g,'&quot;')}">Kelas ${k}</option>`).join('');
         sel.value = list.includes(current) ? current : 'AUTO';
         const hint = document.getElementById('dhKelasHint');
         if (hint) hint.textContent = sel.value === 'AUTO'
             ? 'Scan QR langsung menentukan kelas siswa dan mengirim absensi.'
             : 'Kelas dipilih manual: QR dari kelas lain akan ditolak.';
     };
-
-    if (existingClasses && existingClasses.length) {
-        render(existingClasses);
-    } else {
-        google.script.run.withSuccessHandler(classes => {
-            existingClasses = Array.isArray(classes) ? classes : [];
-            render(existingClasses);
-        }).getDaftarKelas();
-    }
+    firebaseReadClassCatalog().then(classes => render(classes.map(k => k.nama))).catch(err => {
+        console.error('Firebase Direct kelas Daftar Hadir:', err);
+        render(existingClasses || []);
+    });
 }
 
-// -- Ketika kelas atau tanggal berubah --
-function onDhKelasChange() {
-    const kelas   = document.getElementById('dhKelasSelect').value || 'AUTO';
-    const kelasQuery = (kelas === 'AUTO' || kelas === 'SEMUA') ? 'SEMUA' : kelas;
+async function firebaseLoadAttendanceMapForStudents(students, tanggal) {
+    const out = {};
+    if (!tanggal || !students.length) return out;
+    let cursor = 0;
+    const workers = Math.min(25, students.length);
+    async function worker() {
+        while (true) {
+            const i = cursor++;
+            if (i >= students.length) return;
+            const s = students[i];
+            try {
+                const snap = await firebaseAppDbRef('apps/absensi_siswa/attendance/' + tanggal + '_' + s.nisn).once('value');
+                const d = snap.val();
+                if (d) out[s.nisn] = d;
+            } catch (e) {
+                console.warn('Gagal membaca absensi siswa ' + s.nisn, e);
+            }
+        }
+    }
+    await Promise.all(Array.from({length: workers}, worker));
+    return out;
+}
+
+async function onDhKelasChange() {
+    const kelas = document.getElementById('dhKelasSelect').value || 'AUTO';
     const tanggal = document.getElementById('dhTanggal').value;
     const hint = document.getElementById('dhKelasHint');
     if (hint) hint.textContent = kelas === 'AUTO'
         ? 'Scan QR langsung menentukan kelas siswa dan mengirim absensi.'
         : 'Kelas dipilih manual: QR dari kelas lain akan ditolak.';
 
-    dhStudents  = [];
+    dhStudents = [];
     dhStatusMap = {};
     dhPulangMap = {};
     dhLockedMap = {};
@@ -2871,77 +2968,41 @@ function onDhKelasChange() {
     const tbody = document.getElementById('dhSiswaTbody');
     tbody.innerHTML = `<tr><td colspan="${colspan}" class="py-8 text-center text-gray-400"><i class="fas fa-circle-notch fa-spin mr-2"></i>Memuat siswa...</td></tr>`;
 
-    if (dhMode === 'pulang') {
-        // Mode pulang: ambil detail datang+pulang langsung
-        if (!tanggal) { tbody.innerHTML = `<tr><td colspan="5" class="py-8 text-center text-gray-400">Pilih tanggal.</td></tr>`; return; }
-        google.script.run
-            .withSuccessHandler(result => {
-                dhStudents = result || [];
-                // Guru tidak memilih kelas: batasi otomatis sesuai hak kelas akun.
-                if (currentUser && currentUser.role === 'guru' && currentUser.kelas) {
-                    const allowed = String(currentUser.kelas).split(',').map(k => k.trim().toUpperCase()).filter(Boolean);
-                    dhStudents = dhStudents.filter(s => allowed.includes(String(s.kelas).trim().toUpperCase()));
-                }
-                google.script.run
-                    .withSuccessHandler(res => {
-                        dhPulangMap = {};
-                        if (res.success && res.data) {
-                            Object.entries(res.data).forEach(([nisn, d]) => {
-                                dhPulangMap[nisn] = { ...d, checked: false };
-                            });
-                        }
-                        dhRenderPulangTable();
-                    })
-                    .withFailureHandler(() => dhRenderPulangTable())
-                    .getDaftarHadirDetailByKelasAndTanggal(kelasQuery, tanggal);
-            })
-            .withFailureHandler(() => {
-                tbody.innerHTML = `<tr><td colspan="5" class="py-8 text-center text-red-400">Gagal memuat data siswa.</td></tr>`;
-            })
-            .getSiswaByKelas(kelasQuery);
-        return;
+    try {
+        let students = await firebaseReadAllStudents();
+        if (kelas !== 'AUTO' && kelas !== 'SEMUA') {
+            const wanted = String(kelas).trim().toUpperCase();
+            students = students.filter(s => s.kelas.toUpperCase() === wanted);
+        }
+        if (currentUser && currentUser.role === 'guru' && currentUser.kelas) {
+            const allowed = String(currentUser.kelas).split(',').map(k => k.trim().toUpperCase()).filter(Boolean);
+            students = students.filter(s => allowed.includes(s.kelas.toUpperCase()));
+        }
+        students.sort((a,b) => a.nama.localeCompare(b.nama, 'id'));
+        dhStudents = students;
+
+        if (tanggal) {
+            const attendance = await firebaseLoadAttendanceMapForStudents(students, tanggal);
+            dhLockedMap = {};
+            Object.entries(attendance).forEach(([nisn, d]) => {
+                dhLockedMap[nisn] = d && typeof d === 'object'
+                    ? d
+                    : { status: String(d || ''), jamDatang: '', hasJamDatang: true };
+            });
+            if (Object.keys(dhLockedMap).length) document.getElementById('dhSubmittedBanner').classList.remove('hidden');
+        }
+
+        if (dhMode === 'pulang') {
+            dhPulangMap = {};
+            Object.entries(dhLockedMap).forEach(([nisn, d]) => { dhPulangMap[nisn] = { ...d, checked: false }; });
+            dhRenderPulangTable();
+        } else {
+            dhRenderStudentTable();
+        }
+    } catch (e) {
+        console.error('Firebase Direct Daftar Hadir:', e);
+        tbody.innerHTML = `<tr><td colspan="${colspan}" class="py-8 text-center text-red-400">Gagal memuat data siswa: ${String(e.message || e)}</td></tr>`;
     }
-
-    // Mode masuk (default)
-    google.script.run
-        .withSuccessHandler(result => {
-            dhStudents = result || [];
-            // Guru tidak memilih kelas: batasi otomatis sesuai hak kelas akun.
-            if (currentUser && currentUser.role === 'guru' && currentUser.kelas) {
-                const allowed = String(currentUser.kelas).split(',').map(k => k.trim().toUpperCase()).filter(Boolean);
-                dhStudents = dhStudents.filter(s => allowed.includes(String(s.kelas).trim().toUpperCase()));
-            }
-            dhStatusMap = {};
-
-            if (tanggal) {
-                google.script.run
-                    .withSuccessHandler(res => {
-                        dhLockedMap = {};
-                        dhStatusMap = {};
-                        if (res.success && res.data && Object.keys(res.data).length > 0) {
-                            document.getElementById('dhSubmittedBanner').classList.remove('hidden');
-                            Object.entries(res.data).forEach(([nisn, d]) => {
-                                // Simpan seluruh objek agar bisa tampilkan jam di UI
-                                if (d && typeof d === 'object') {
-                                    dhLockedMap[nisn] = d; // { status, jamDatang, hasJamDatang }
-                                } else {
-                                    dhLockedMap[nisn] = { status: d, jamDatang: '', hasJamDatang: true };
-                                }
-                            });
-                        }
-                        dhRenderStudentTable();
-                    })
-                    .withFailureHandler(() => dhRenderStudentTable())
-                    .getDaftarHadirByKelasAndTanggal(kelasQuery, tanggal);
-            } else {
-                dhLockedMap = {};
-                dhRenderStudentTable();
-            }
-        })
-        .withFailureHandler(() => {
-            tbody.innerHTML = '<tr><td colspan="3" class="py-8 text-center text-red-400">Gagal memuat data siswa.</td></tr>';
-        })
-        .getSiswaByKelas(kelasQuery);
 }
 
 // -- Render tabel siswa --
@@ -3864,32 +3925,22 @@ function loadManajemenKelas() {
     mkLoadKelas();
 }
 
-function mkLoadKelas() {
+async function mkLoadKelas() {
     const list = document.getElementById('mkKelasList');
     list.innerHTML = '<div class="text-center py-10 text-gray-400"><i class="fas fa-circle-notch fa-spin text-2xl mb-3 block"></i><p class="text-sm">Memuat data kelas...</p></div>';
     document.getElementById('mkTotalKelas').textContent = '—';
     document.getElementById('mkTotalSiswa').textContent = '— siswa terdaftar';
-
-    google.script.run
-        .withSuccessHandler(res => {
-            if (!res.success) { mkShowListError(res.message); return; }
-            mkAllKelas = res.data || [];
-            mkRenderList(mkAllKelas);
-            document.getElementById('mkTotalKelas').textContent = mkAllKelas.length;
-        })
-        .withFailureHandler(err => mkShowListError(String(err)))
-        .getKelasMaster();
-
-    // Count siswa per kelas
-    google.script.run
-        .withSuccessHandler(res => {
-            if (res && res.success && res.data) {
-                const total = res.data.length;
-                document.getElementById('mkTotalSiswa').textContent = total + ' siswa terdaftar';
-            }
-        })
-        .withFailureHandler(() => {})
-        .getSiswaList(null);
+    try {
+        const [kelas, students] = await Promise.all([firebaseReadClassCatalog(), firebaseReadAllStudents()]);
+        mkAllKelas = kelas;
+        mkRenderList(mkAllKelas);
+        document.getElementById('mkTotalKelas').textContent = mkAllKelas.length;
+        document.getElementById('mkTotalSiswa').textContent = students.length + ' siswa terdaftar';
+        existingClasses = mkAllKelas.map(k => k.nama);
+        populateAllClassDropdowns();
+    } catch (e) {
+        mkShowListError(String(e.message || e));
+    }
 }
 
 function mkShowListError(msg) {
@@ -3899,7 +3950,7 @@ function mkShowListError(msg) {
 
 function mkFilterKelas() {
     const q = document.getElementById('mkSearchKelas').value.trim().toLowerCase();
-    const filtered = q ? mkAllKelas.filter(k => k.nama.toLowerCase().includes(q)) : mkAllKelas;
+    const filtered = q ? mkAllKelas.filter(k => String(k && k.nama || '').toLowerCase().includes(q)) : mkAllKelas;
     mkRenderList(filtered);
 }
 
@@ -3910,129 +3961,141 @@ function mkRenderList(kelasList) {
         return;
     }
     list.innerHTML = kelasList.map((k, i) => {
-        const initials = k.nama.substring(0, 2).toUpperCase();
+        const nama = String(k && k.nama || '').trim();
+        if (!nama) return '';
+        const id = String(k.id || k.rowIndex || ('kelas_' + i));
+        const safeId = encodeURIComponent(id);
+        const initials = nama.substring(0, 2).toUpperCase();
+        const sourceText = k.source === 'manual' ? 'Manual' : (k.source === 'students+manual' ? 'Siswa + manual' : 'Otomatis dari siswa');
         return `
-        <div class="kelas-card" id="kelas-card-${k.rowIndex}">
+        <div class="kelas-card" id="kelas-card-${safeId}">
           <div class="kelas-avatar">${initials}</div>
           <div class="flex-1 min-w-0">
-            <div id="kelas-label-${k.rowIndex}" class="font-bold text-sm text-gray-800">${k.nama}</div>
-            <input id="kelas-input-${k.rowIndex}" type="text" value="${k.nama}"
+            <div id="kelas-label-${safeId}" class="font-bold text-sm text-gray-800">${nama}</div>
+            <input id="kelas-input-${safeId}" type="text" value="${nama.replace(/&/g,'&amp;').replace(/"/g,'&quot;')}"
               class="kelas-input-edit hidden"
-              onkeydown="if(event.key==='Enter') mkSimpanEdit(${k.rowIndex}); if(event.key==='Escape') mkBatalEdit(${k.rowIndex});">
-            <div class="text-[10px] text-gray-400 mt-0.5">Kelas ke-${i + 1}</div>
+              onkeydown="if(event.key==='Enter') mkSimpanEdit('${safeId}'); if(event.key==='Escape') mkBatalEdit('${safeId}');">
+            <div class="text-[10px] text-gray-400 mt-0.5">${sourceText}</div>
           </div>
-          <div class="flex items-center gap-1.5" id="kelas-actions-${k.rowIndex}">
-            <button onclick="mkMulaiEdit(${k.rowIndex})"
-              class="w-8 h-8 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-600 flex items-center justify-center transition text-sm" title="Edit">
-              <i class="fas fa-pen text-xs"></i>
-            </button>
-            <button onclick="mkHapusKelas(${k.rowIndex}, '${k.nama.replace(/'/g, "\'")}')"
-              class="w-8 h-8 rounded-lg bg-red-50 hover:bg-red-100 text-red-500 flex items-center justify-center transition text-sm" title="Hapus">
-              <i class="fas fa-trash text-xs"></i>
-            </button>
+          <div id="kelas-actions-${safeId}" class="flex items-center gap-1.5">
+            <button onclick="mkMulaiEdit('${safeId}')" class="w-8 h-8 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-600 flex items-center justify-center transition" title="Edit"><i class="fas fa-pen text-xs"></i></button>
+            <button onclick="mkHapusKelas('${safeId}', ${JSON.stringify(nama)})" class="w-8 h-8 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 flex items-center justify-center transition" title="Hapus"><i class="fas fa-trash text-xs"></i></button>
           </div>
-          <div class="hidden items-center gap-1.5" id="kelas-edit-actions-${k.rowIndex}">
-            <button onclick="mkSimpanEdit(${k.rowIndex})"
-              class="w-8 h-8 rounded-lg bg-green-500 hover:bg-green-600 text-white flex items-center justify-center transition" title="Simpan">
-              <i class="fas fa-check text-xs"></i>
-            </button>
-            <button onclick="mkBatalEdit(${k.rowIndex})"
-              class="w-8 h-8 rounded-lg bg-gray-200 hover:bg-gray-300 text-gray-600 flex items-center justify-center transition" title="Batal">
-              <i class="fas fa-times text-xs"></i>
-            </button>
+          <div id="kelas-edit-actions-${safeId}" class="hidden items-center gap-1.5">
+            <button onclick="mkSimpanEdit('${safeId}')" class="w-8 h-8 rounded-lg bg-green-500 hover:bg-green-600 text-white flex items-center justify-center transition" title="Simpan"><i class="fas fa-check text-xs"></i></button>
+            <button onclick="mkBatalEdit('${safeId}')" class="w-8 h-8 rounded-lg bg-gray-200 hover:bg-gray-300 text-gray-600 flex items-center justify-center transition" title="Batal"><i class="fas fa-times text-xs"></i></button>
           </div>
         </div>`;
     }).join('');
 }
 
-function mkMulaiEdit(rowIndex) {
-    document.getElementById('kelas-label-' + rowIndex).classList.add('hidden');
-    document.getElementById('kelas-input-' + rowIndex).classList.remove('hidden');
-    document.getElementById('kelas-actions-' + rowIndex).classList.add('hidden');
-    document.getElementById('kelas-edit-actions-' + rowIndex).classList.remove('hidden');
-    document.getElementById('kelas-edit-actions-' + rowIndex).classList.add('flex');
-    const inp = document.getElementById('kelas-input-' + rowIndex);
+function mkFindKelas(id) {
+    const decoded = decodeURIComponent(String(id));
+    return mkAllKelas.find(k => String(k.id || k.rowIndex) === decoded) || null;
+}
+
+function mkMulaiEdit(id) {
+    const key = encodeURIComponent(String(id));
+    document.getElementById('kelas-label-' + key).classList.add('hidden');
+    document.getElementById('kelas-input-' + key).classList.remove('hidden');
+    document.getElementById('kelas-actions-' + key).classList.add('hidden');
+    document.getElementById('kelas-edit-actions-' + key).classList.remove('hidden');
+    document.getElementById('kelas-edit-actions-' + key).classList.add('flex');
+    const inp = document.getElementById('kelas-input-' + key);
     inp.focus(); inp.select();
 }
 
-function mkBatalEdit(rowIndex) {
-    const k = mkAllKelas.find(x => x.rowIndex === rowIndex);
-    if (k) document.getElementById('kelas-input-' + rowIndex).value = k.nama;
-    document.getElementById('kelas-label-' + rowIndex).classList.remove('hidden');
-    document.getElementById('kelas-input-' + rowIndex).classList.add('hidden');
-    document.getElementById('kelas-actions-' + rowIndex).classList.remove('hidden');
-    document.getElementById('kelas-edit-actions-' + rowIndex).classList.add('hidden');
-    document.getElementById('kelas-edit-actions-' + rowIndex).classList.remove('flex');
+function mkBatalEdit(id) {
+    const k = mkFindKelas(id);
+    const key = encodeURIComponent(String(id));
+    if (k) document.getElementById('kelas-input-' + key).value = k.nama;
+    document.getElementById('kelas-label-' + key).classList.remove('hidden');
+    document.getElementById('kelas-input-' + key).classList.add('hidden');
+    document.getElementById('kelas-actions-' + key).classList.remove('hidden');
+    document.getElementById('kelas-edit-actions-' + key).classList.add('hidden');
+    document.getElementById('kelas-edit-actions-' + key).classList.remove('flex');
 }
 
-function mkSimpanEdit(rowIndex) {
-    const namaBaru = document.getElementById('kelas-input-' + rowIndex).value.trim();
+async function firebaseRenameClass(oldName, newName, manualId) {
+    const students = await firebaseReadAllStudents();
+    const oldUpper = oldName.toUpperCase();
+    const newUpper = newName.toUpperCase();
+    if (oldUpper !== newUpper && students.some(s => s.kelas.toUpperCase() === newUpper)) {
+        throw new Error(`Kelas "${newName}" sudah digunakan.`);
+    }
+    const updates = {};
+    students.filter(s => s.kelas.toUpperCase() === oldUpper).forEach(s => {
+        updates['shared/students/' + s.key + '/kelas'] = newName;
+    });
+    if (Object.keys(updates).length) await firebaseAppDbRef('').update(updates);
+    if (manualId) await firebaseAppDbRef('shared/classes/' + manualId).update({nama: newName, updatedAt: new Date().toISOString()});
+}
+
+async function mkSimpanEdit(id) {
+    const k = mkFindKelas(id);
+    const key = encodeURIComponent(String(id));
+    const input = document.getElementById('kelas-input-' + key);
+    const namaBaru = input ? input.value.trim() : '';
+    if (!k) { showAlert('error', 'Data kelas tidak ditemukan.'); return; }
     if (!namaBaru) { showAlert('error', 'Nama kelas tidak boleh kosong.'); return; }
     showLoading();
-    google.script.run
-        .withSuccessHandler(res => {
-            hideLoading();
-            if (res.success) {
-                showAlert('success', res.message);
-                mkLoadKelas();
-            } else {
-                showAlert('error', res.message);
-                mkBatalEdit(rowIndex);
-            }
-        })
-        .withFailureHandler(err => { hideLoading(); showAlert('error', String(err)); mkBatalEdit(rowIndex); })
-        .updateKelas(rowIndex, namaBaru);
+    try {
+        await firebaseRenameClass(k.nama, namaBaru, k.manualId || (k.source === 'manual' ? k.id : null));
+        hideLoading();
+        showAlert('success', `Kelas berhasil diubah menjadi "${namaBaru}".`);
+        await mkLoadKelas();
+    } catch (e) {
+        hideLoading();
+        showAlert('error', String(e.message || e));
+        mkBatalEdit(id);
+    }
 }
 
-function mkHapusKelas(rowIndex, namaKelas) {
-    Swal.fire({
+async function mkHapusKelas(id, namaKelas) {
+    const k = mkFindKelas(id);
+    const result = await Swal.fire({
         title: 'Hapus Kelas?',
-        html: `<p class="text-gray-600 text-sm">Kelas <b>${namaKelas}</b> akan dihapus dari sistem.<br><span class="text-red-500 text-xs">Kelas tidak bisa dihapus jika masih ada siswa terdaftar.</span></p>`,
-        icon: 'warning',
-        showCancelButton: true,
-        confirmButtonColor: '#ef4444',
-        cancelButtonColor: '#6b7280',
-        confirmButtonText: 'Ya, Hapus',
-        cancelButtonText: 'Batal'
-    }).then(r => {
-        if (!r.isConfirmed) return;
-        showLoading();
-        google.script.run
-            .withSuccessHandler(res => {
-                hideLoading();
-                if (res.success) { showAlert('success', res.message); mkLoadKelas(); }
-                else Swal.fire('Gagal', res.message, 'error');
-            })
-            .withFailureHandler(err => { hideLoading(); showAlert('error', String(err)); })
-            .deleteKelas(rowIndex, namaKelas);
+        html: `<p class="text-gray-600 text-sm">Kelas <b>${namaKelas}</b> akan dihapus dari master kelas.<br><span class="text-red-500 text-xs">Kelas tidak bisa dihapus jika masih ada siswa terdaftar.</span></p>`,
+        icon: 'warning', showCancelButton: true, confirmButtonColor: '#ef4444', cancelButtonColor: '#6b7280',
+        confirmButtonText: 'Ya, Hapus', cancelButtonText: 'Batal'
     });
+    if (!result.isConfirmed) return;
+    showLoading();
+    try {
+        const students = await firebaseReadAllStudents();
+        const count = students.filter(s => s.kelas.toUpperCase() === String(namaKelas).toUpperCase()).length;
+        if (count > 0) throw new Error(`Kelas "${namaKelas}" masih digunakan oleh ${count} siswa. Pindahkan siswa terlebih dahulu.`);
+        if (k && k.manualId) await firebaseAppDbRef('shared/classes/' + k.manualId).remove();
+        hideLoading();
+        showAlert('success', `Kelas "${namaKelas}" berhasil dihapus.`);
+        await mkLoadKelas();
+    } catch (e) {
+        hideLoading();
+        Swal.fire('Gagal', String(e.message || e), 'error');
+    }
 }
 
-function mkTambahKelas() {
+async function mkTambahKelas() {
     const inp = document.getElementById('inputNamaKelas');
     const nama = inp.value.trim();
     if (!nama) { inp.focus(); showAlert('error', 'Masukkan nama kelas terlebih dahulu.'); return; }
     const btn = document.getElementById('btnTambahKelas');
     btn.disabled = true;
     btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Menyimpan...';
-    google.script.run
-        .withSuccessHandler(res => {
-            btn.disabled = false;
-            btn.innerHTML = '<i class="fas fa-plus-circle"></i> Tambah Kelas';
-            if (res.success) {
-                showAlert('success', res.message);
-                inp.value = '';
-                mkLoadKelas();
-            } else {
-                showAlert('error', res.message);
-            }
-        })
-        .withFailureHandler(err => {
-            btn.disabled = false;
-            btn.innerHTML = '<i class="fas fa-plus-circle"></i> Tambah Kelas';
-            showAlert('error', String(err));
-        })
-        .addKelas(nama);
+    try {
+        const kelas = await firebaseReadClassCatalog();
+        if (kelas.some(k => k.nama.toLowerCase() === nama.toLowerCase())) throw new Error(`Kelas "${nama}" sudah ada.`);
+        const id = firebaseClassKey(nama);
+        await firebaseAppDbRef('shared/classes/' + id).set({nama, active: true, createdAt: new Date().toISOString(), createdBy: (currentUser && (currentUser.uid || currentUser.username)) || 'admin'});
+        inp.value = '';
+        showAlert('success', `Kelas "${nama}" berhasil ditambahkan.`);
+        await mkLoadKelas();
+    } catch (e) {
+        showAlert('error', String(e.message || e));
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-plus-circle"></i> Tambah Kelas';
+    }
 }
 
     function loadKelolaAbsen() {
@@ -4998,61 +5061,67 @@ function renderRekapRows(data) {
 }
 
     // --- MONITORING ---
-function loadMonitoringAbsensi() {
+async function loadMonitoringAbsensi() {
     stopAndBack(false);
     setActiveMenu('Monitoring');
     showView('view-monitoring');
     document.getElementById('monitoringDate').textContent = new Date().toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
-    
-    // --- Set Default Tanggal Export ke Hari Ini ---
-    const todayISO = new Date().toISOString().split('T')[0];
+
+    const todayISO = firebaseTodayISO();
     const elStart = document.getElementById('exportMonStart');
     const elEnd = document.getElementById('exportMonEnd');
     if(elStart && !elStart.value) elStart.value = todayISO;
     if(elEnd && !elEnd.value) elEnd.value = todayISO;
 
-    // --- Populate dropdown filter kelas ---
     const kelasDropdown = document.getElementById('filterKelasMonitoring');
     if (kelasDropdown) {
-        kelasDropdown.style.display = '';
-        if (kelasDropdown.parentElement) kelasDropdown.parentElement.style.display = '';
-
-        // Tentukan daftar kelas yang ditampilkan di dropdown
-        let kelasList = [];
+        const classes = await firebaseReadClassCatalog().catch(() => (existingClasses || []).map(nama => ({nama})));
+        let kelasList = classes.map(k => k.nama);
         if (currentUser.role === 'guru' && currentUser.kelas) {
-            // Guru: hanya kelas yang dipegang (bisa lebih dari satu)
-            kelasList = String(currentUser.kelas).split(',').map(k => k.trim()).filter(Boolean);
-        } else {
-            // Admin / Wakel: semua kelas
-            kelasList = existingClasses || [];
+            const allowed = String(currentUser.kelas).split(',').map(k => k.trim()).filter(Boolean);
+            kelasList = kelasList.filter(k => allowed.some(a => a.toUpperCase() === String(k).toUpperCase()));
         }
-
         const currentVal = kelasDropdown.value;
-        let opts = '<option value="">Semua Kelas</option>';
-        kelasList.forEach(k => {
-            opts += `<option value="${k}" ${currentVal === k ? 'selected' : ''}>${k}</option>`;
-        });
-        kelasDropdown.innerHTML = opts;
+        kelasDropdown.innerHTML = '<option value="">Semua Kelas</option>' + kelasList.map(k => `<option value="${String(k).replace(/"/g,'&quot;')}">${k}</option>`).join('');
+        if (kelasList.includes(currentVal)) kelasDropdown.value = currentVal;
     }
-
-    // Tentukan filter kelas server-side:
-    // - Guru 1 kelas : kirim kelas itu sebagai filter (hemat data)
-    // - Guru multi-kelas : kirim semua kelas miliknya ke server
-    // - Admin/Wakel : tidak filter di server (ambil semua, filter di client)
-    const myClass = currentUser.role === 'guru' ? currentUser.kelas : null;
 
     if (tableState.monitoring.fullData.length > 0) {
         processTableData('monitoring');
-    } else {
-        document.getElementById('tbody-monitoring').innerHTML = '<tr><td colspan="7" class="p-8 text-center text-gray-500"><i class="fas fa-circle-notch fa-spin mr-2"></i>Memuat data...</td></tr>';
-        google.script.run.withSuccessHandler(result => {
-            if (result.success) {
-                tableState.monitoring.fullData = result.data;
-                processTableData('monitoring');
-            } else {
-                document.getElementById('tbody-monitoring').innerHTML = '<tr><td colspan="7" class="p-12 text-center text-gray-400 italic bg-white">Data tidak ditemukan.</td></tr>';
-            }
-        }).getMonitoringRealtime(myClass);
+        return;
+    }
+
+    const tbody = document.getElementById('tbody-monitoring');
+    tbody.innerHTML = '<tr><td colspan="7" class="p-8 text-center text-gray-500"><i class="fas fa-circle-notch fa-spin mr-2"></i>Memuat data...</td></tr>';
+    try {
+        let students = await firebaseReadAllStudents();
+        if (currentUser.role === 'guru' && currentUser.kelas) {
+            const allowed = String(currentUser.kelas).split(',').map(k => k.trim().toUpperCase()).filter(Boolean);
+            students = students.filter(s => allowed.includes(s.kelas.toUpperCase()));
+        }
+        students.sort((a,b) => a.nama.localeCompare(b.nama, 'id'));
+        const attendance = await firebaseLoadAttendanceMapForStudents(students, todayISO);
+        tableState.monitoring.fullData = students.map(s => {
+            const d = attendance[s.nisn] || {};
+            const rawStatus = String(d.status ?? d.statusKehadiran ?? d.kehadiran ?? '').trim().toLowerCase();
+            let status = 'Belum Absen';
+            if (rawStatus === 'hadir') status = 'Hadir';
+            else if (rawStatus === 'sakit') status = 'Sakit';
+            else if (rawStatus === 'izin' || rawStatus === 'ijin') status = 'Izin';
+            else if (rawStatus === 'alpa' || rawStatus === 'alpha' || rawStatus === 'tanpa keterangan') status = 'Alpa';
+            return {
+                nama: s.nama, nisn: s.nisn, kelas: s.kelas,
+                jamDatang: d.jamDatang ?? d.jamMasuk ?? d.masuk ?? '-',
+                jamPulang: d.jamPulang ?? d.jamKeluar ?? d.pulang ?? '-',
+                keterangan: d.keterangan ?? d.keteranganWaktu ?? d.ket ?? '-',
+                status
+            };
+        });
+        processTableData('monitoring');
+    } catch (e) {
+        console.error('Firebase Direct Monitoring:', e);
+        tableState.monitoring.fullData = [];
+        tbody.innerHTML = `<tr><td colspan="7" class="p-12 text-center text-red-400">Gagal memuat data monitoring: ${String(e.message || e)}</td></tr>`;
     }
 }
 
